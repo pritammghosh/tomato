@@ -1,0 +1,10 @@
+path: C:\Users\prita\Downloads\Tomato Final
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 3
+names:
+  0: defective_tomato
+  1: ripe_tomato
+  2: unripe_tomato
