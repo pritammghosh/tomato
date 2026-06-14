@@ -447,11 +447,24 @@ export default function App() {
                     <span>Time</span>
                     <strong>{formatTimestamp(result.generatedAt)}</strong>
                   </div>
+                  <div className="report-meta">
+                    <span>Models</span>
+                    <strong>{result.modelInfo?.classifierActive ? "Detector + Classifier" : "Detector only"}</strong>
+                  </div>
                 </div>
                 <div className="report-actions">
                   <ExportButton onClick={() => downloadReport("pdf")}>PDF</ExportButton>
                   <ExportButton onClick={() => downloadReport("docx")}>DOCX</ExportButton>
                 </div>
+              </div>
+
+              <div className="insight-banner">
+                <span>Model check</span>
+                <p>
+                  {result.modelInfo?.classifierActive
+                    ? `Classifier loaded: ${result.modelInfo.classifier}. Used on ${result.classifierUsedCount || 0} detected regions.`
+                    : "Classifier not loaded. Only the detector ran for this report."}
+                </p>
               </div>
 
               {savedNotice ? <p className="feedback feedback--success">{savedNotice}</p> : null}

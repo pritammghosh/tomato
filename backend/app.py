@@ -28,10 +28,14 @@ except ImportError:  # pragma: no cover - allows running from backend/ directly
 BASE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = BASE_DIR.parent
 MODEL_PATH = ROOT_DIR / "best.pt"
+DEFAULT_CLASSIFIER_MODEL_PATH = ROOT_DIR / "bestclassifier.pt"
 _classifier_path_value = os.environ.get("CLASSIFIER_MODEL_PATH", "").strip()
-CLASSIFIER_MODEL_PATH = Path(_classifier_path_value).expanduser() if _classifier_path_value else None
+if _classifier_path_value:
+    CLASSIFIER_MODEL_PATH = Path(_classifier_path_value).expanduser()
+else:
+    CLASSIFIER_MODEL_PATH = DEFAULT_CLASSIFIER_MODEL_PATH if DEFAULT_CLASSIFIER_MODEL_PATH.exists() else None
 if CLASSIFIER_MODEL_PATH is not None and not CLASSIFIER_MODEL_PATH.exists():
-    CLASSIFIER_MODEL_PATH = None
+    CLASSIFIER_MODEL_PATH = DEFAULT_CLASSIFIER_MODEL_PATH if DEFAULT_CLASSIFIER_MODEL_PATH.exists() else None
 UPLOAD_DIR = BASE_DIR / "uploads"
 REPORT_DIR = BASE_DIR / "reports"
 
@@ -566,6 +570,14 @@ async def analyze(file: UploadFile = File(...), confidence: float = 0.25) -> dic
     payload = make_report_payload(report)
     payload["reportId"] = report_id
     payload["storedImage"] = stored_name
+    payload["modelInfo"] = {
+        "detector": MODEL_PATH.name,
+        "classifier": CLASSIFIER_MODEL_PATH.name if CLASSIFIER_MODEL_PATH else None,
+        "classifierActive": CLASSIFIER_MODEL_PATH is not None,
+    }
+    payload["classifierUsedCount"] = sum(
+        1 for item in payload.get("assessments", []) if item.get("classifierLabel")
+    )
 
     report_path = REPORT_DIR / f"{report_id}.json"
     report_path.write_text(json.dumps(report_to_json(payload), indent=2), encoding="utf-8")
