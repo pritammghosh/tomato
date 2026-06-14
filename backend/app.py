@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import os
 import shutil
 import textwrap
 from io import BytesIO
@@ -27,6 +28,10 @@ except ImportError:  # pragma: no cover - allows running from backend/ directly
 BASE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = BASE_DIR.parent
 MODEL_PATH = ROOT_DIR / "best.pt"
+_classifier_path_value = os.environ.get("CLASSIFIER_MODEL_PATH", "").strip()
+CLASSIFIER_MODEL_PATH = Path(_classifier_path_value).expanduser() if _classifier_path_value else None
+if CLASSIFIER_MODEL_PATH is not None and not CLASSIFIER_MODEL_PATH.exists():
+    CLASSIFIER_MODEL_PATH = None
 UPLOAD_DIR = BASE_DIR / "uploads"
 REPORT_DIR = BASE_DIR / "reports"
 
@@ -547,7 +552,12 @@ async def analyze(file: UploadFile = File(...), confidence: float = 0.25) -> dic
         shutil.copyfileobj(file.file, buffer)
 
     try:
-        report = analyze_uploaded_image(MODEL_PATH, stored_path, confidence=confidence)
+        report = analyze_uploaded_image(
+            MODEL_PATH,
+            stored_path,
+            confidence=confidence,
+            classifier_path=CLASSIFIER_MODEL_PATH,
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001

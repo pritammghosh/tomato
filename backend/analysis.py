@@ -56,6 +56,8 @@ class TomatoAssessment:
     color: str
     defect_percent: float
     confidence: float
+    classifier_label: str | None
+    classifier_confidence: float
     center_x: int
     center_y: int
     mask: np.ndarray
@@ -68,6 +70,14 @@ def load_model(model_path: Path) -> YOLO:
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
     return YOLO(str(model_path))
+
+
+def load_optional_model(model_path: Path | None) -> YOLO | None:
+    if model_path is None:
+        return None
+    if not model_path.exists():
+        return None
+    return load_model(model_path)
 
 
 def encode_pil_image(image: Image.Image) -> str:
@@ -139,6 +149,20 @@ def box_iou(left: np.ndarray, right: np.ndarray) -> float:
 
 def mask_overlap_pixels(left: np.ndarray, right: np.ndarray) -> int:
     return int(np.sum(left & right))
+
+
+def normalize_classifier_label(raw_label: str | None) -> str | None:
+    if not raw_label:
+        return None
+
+    label = str(raw_label).strip().lower().replace("-", "_").replace(" ", "_")
+    if any(token in label for token in ("defect", "rot", "rotten", "bad", "damaged", "bruise")):
+        return "Defective"
+    if any(token in label for token in ("unripe", "green", "immature", "raw")):
+        return "Unripe"
+    if any(token in label for token in ("ripe", "mature", "red")):
+        return "Ripe"
+    return None
 
 
 def should_merge_same_class(left: Detection, right: Detection) -> bool:
@@ -230,6 +254,48 @@ def should_attach_defect_to_tomato(tomato: Detection, defect: Detection) -> bool
     return defect_coverage >= 0.45 or tomato_coverage >= 0.02 or box_iou(tomato.box, defect.box) >= 0.12
 
 
+def classify_tomato_crop(
+    classifier_model: YOLO | None, image_array: np.ndarray, tomato: Detection
+) -> tuple[str | None, float]:
+    if classifier_model is None:
+        return None, 0.0
+
+    y_indices, x_indices = np.where(tomato.mask)
+    if len(x_indices) == 0:
+        return None, 0.0
+
+    x1 = max(0, int(x_indices.min()) - 12)
+    y1 = max(0, int(y_indices.min()) - 12)
+    x2 = min(image_array.shape[1], int(x_indices.max()) + 13)
+    y2 = min(image_array.shape[0], int(y_indices.max()) + 13)
+    crop = image_array[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None, 0.0
+
+    try:
+        result = classifier_model.predict(source=crop, verbose=False)[0]
+    except Exception:  # noqa: BLE001
+        return None, 0.0
+
+    probs = getattr(result, "probs", None)
+    if probs is None:
+        return None, 0.0
+
+    top_index = int(getattr(probs, "top1", -1))
+    top_confidence = float(getattr(probs, "top1conf", 0.0))
+    if top_index < 0:
+        return None, 0.0
+
+    names = getattr(classifier_model, "names", None) or getattr(result, "names", None)
+    raw_label: str | None = None
+    if isinstance(names, dict):
+        raw_label = names.get(top_index)
+    elif isinstance(names, (list, tuple)) and top_index < len(names):
+        raw_label = names[top_index]
+
+    return normalize_classifier_label(raw_label), top_confidence
+
+
 def dilate_mask(mask: np.ndarray, iterations: int = 1) -> np.ndarray:
     if iterations <= 0:
         return mask
@@ -317,7 +383,7 @@ def calculate_quality_percentages(
 
 
 def assess_tomatoes(
-    tomatoes: list[Detection], defects: list[Detection], image_array: np.ndarray
+    tomatoes: list[Detection], defects: list[Detection], image_array: np.ndarray, classifier_model: YOLO | None = None
 ) -> list[TomatoAssessment]:
     assessments: list[TomatoAssessment] = []
 
@@ -334,10 +400,20 @@ def assess_tomatoes(
         effective_area = int(np.sum(effective_mask))
         defect_percent = (defect_area / effective_area * 100) if effective_area else 0.0
 
+        classifier_label, classifier_confidence = classify_tomato_crop(classifier_model, image_array, tomato)
+
         if defect_percent > DEFECT_THRESHOLD_PERCENT:
             status = "Defective"
             label = f"Defective ({defect_percent:.1f}%)"
             color = COLORS["defective"]
+        elif classifier_label == "Defective" and classifier_confidence >= 0.55:
+            status = "Defective"
+            label = "Defective" if defect_percent == 0 else f"Defective ({defect_percent:.1f}%)"
+            color = COLORS["defective"]
+        elif classifier_label in {"Ripe", "Unripe"} and classifier_confidence >= 0.60:
+            status = classifier_label
+            label = classifier_label
+            color = COLORS["ripe"] if classifier_label == "Ripe" else COLORS["unripe"]
         elif tomato.class_id == CLASS_RIPE:
             status = "Ripe"
             label = "Ripe"
@@ -359,6 +435,8 @@ def assess_tomatoes(
                 color=color,
                 defect_percent=defect_percent,
                 confidence=tomato.confidence,
+                classifier_label=classifier_label,
+                classifier_confidence=classifier_confidence,
                 center_x=int(np.mean(x_indices)),
                 center_y=int(np.mean(y_indices)),
                 mask=tomato.mask,
@@ -394,6 +472,8 @@ def assess_standalone_defects(
                 color=COLORS["defective"],
                 defect_percent=100.0,
                 confidence=defect.confidence,
+                classifier_label=None,
+                classifier_confidence=0.0,
                 center_x=int(np.mean(x_indices)),
                 center_y=int(np.mean(y_indices)),
                 mask=defect.mask,
@@ -552,7 +632,9 @@ def summarize_assessment(report: dict[str, Any]) -> str:
     return "The sample looks acceptable based on the configured detection rule."
 
 
-def analyze_image(model: YOLO, image_path: Path, confidence: float) -> dict[str, Any]:
+def analyze_image(
+    model: YOLO, image_path: Path, confidence: float, classifier_model: YOLO | None = None
+) -> dict[str, Any]:
     results = model.predict(source=str(image_path), conf=confidence, verbose=False)
     result = results[0]
 
@@ -562,7 +644,7 @@ def analyze_image(model: YOLO, image_path: Path, confidence: float) -> dict[str,
     original_image = Image.open(image_path).convert("RGB")
     image_array = np.array(original_image)
 
-    assessments = assess_tomatoes(tomatoes, defects, image_array)
+    assessments = assess_tomatoes(tomatoes, defects, image_array, classifier_model=classifier_model)
     assessments.extend(assess_standalone_defects(defects, tomatoes, len(assessments)))
 
     ripe_count = sum(1 for item in assessments if item.status == "Ripe")
@@ -616,6 +698,8 @@ def analyze_image(model: YOLO, image_path: Path, confidence: float) -> dict[str,
                 "color": item.color,
                 "defectPercent": round(float(item.defect_percent), 2),
                 "confidence": round(float(item.confidence), 3),
+                "classifierLabel": item.classifier_label,
+                "classifierConfidence": round(float(item.classifier_confidence), 3),
             }
             for item in assessments
         ],
@@ -627,9 +711,15 @@ def analyze_image(model: YOLO, image_path: Path, confidence: float) -> dict[str,
     return report
 
 
-def analyze_uploaded_image(model_path: Path, image_path: Path, confidence: float = 0.25) -> dict[str, Any]:
+def analyze_uploaded_image(
+    model_path: Path,
+    image_path: Path,
+    confidence: float = 0.25,
+    classifier_path: Path | None = None,
+) -> dict[str, Any]:
     model = load_model(model_path)
-    return analyze_image(model, image_path, confidence)
+    classifier_model = load_optional_model(classifier_path)
+    return analyze_image(model, image_path, confidence, classifier_model=classifier_model)
 
 
 def make_report_payload(report: dict[str, Any]) -> dict[str, Any]:
