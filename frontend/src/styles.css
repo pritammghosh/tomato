@@ -375,7 +375,7 @@
   }
 
   .report-meta strong {
-    @apply break-words text-[0.95rem] text-[#102033];
+    @apply block overflow-hidden whitespace-nowrap text-ellipsis text-[0.95rem] text-[#102033];
   }
 
   .report-actions {

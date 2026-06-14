@@ -5,13 +5,13 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 const MODES = [
   {
     id: "upload",
-    title: "Upload Image",
-    description: "Pick a tomato image from disk and generate the full quality report.",
+    title: "Upload",
+    description: "Choose a file and analyze it.",
   },
   {
     id: "webcam",
-    title: "Test with Webcam",
-    description: "Open the camera, capture a frame, and send it straight to the analyzer.",
+    title: "Webcam",
+    description: "Capture a frame and analyze it.",
   },
 ];
 
@@ -33,6 +33,25 @@ function formatTimestamp(value) {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(parsed);
+}
+
+function shortenFileName(name, maxLength = 24) {
+  if (!name || name.length <= maxLength) {
+    return name || "N/A";
+  }
+
+  const dotIndex = name.lastIndexOf(".");
+  const extension = dotIndex > -1 ? name.slice(dotIndex) : "";
+  const stem = dotIndex > -1 ? name.slice(0, dotIndex) : name;
+  const room = maxLength - extension.length - 1;
+
+  if (room <= 4) {
+    return `${stem.slice(0, maxLength - 1)}…`;
+  }
+
+  const left = Math.ceil(room * 0.55);
+  const right = Math.max(1, room - left);
+  return `${stem.slice(0, left)}…${stem.slice(-right)}${extension}`;
 }
 
 function StatCard({ label, value, tone }) {
@@ -289,28 +308,25 @@ export default function App() {
           <span className="brand-mark">TM</span>
           <div>
             <strong>Tomato Grading Console</strong>
-            <span>Inspection, analysis, and export in one flow</span>
+            <span>Inspect. Export.</span>
           </div>
         </div>
-        <div className="topbar-chip">PDF and DOCX exports ready</div>
       </div>
 
       <header className="hero">
         <div className="hero-copywrap">
-          <p className="eyebrow">Tomato grading workstation</p>
-          <h1>Premium tomato inspection dashboard.</h1>
+          <p className="eyebrow">Tomato inspection</p>
+          <h1>Inspect tomatoes faster.</h1>
           <p className="hero-copy">
-            Use the webcam for live inspection or upload a file for batch testing. The backend runs the YOLO
-            segmentation model and returns the complete report instantly.
+            Upload or capture. Review. Export.
           </p>
         </div>
 
         <div className="hero-note">
-          <span>Workflow</span>
-          <strong>1. Choose mode</strong>
-          <strong>2. Upload or capture</strong>
-          <strong>3. Review results</strong>
-          <strong>4. Export the report</strong>
+          <span>Steps</span>
+          <strong>Upload</strong>
+          <strong>Inspect</strong>
+          <strong>Export</strong>
         </div>
       </header>
 
@@ -341,8 +357,8 @@ export default function App() {
             <div className="upload-box">
               <label className="file-drop">
                 <input type="file" accept="image/*" onChange={handleFileChange} />
-                <strong>Drop or choose an image</strong>
-                <span>JPG, PNG, WEBP, or BMP</span>
+                <strong>Select image</strong>
+                <span>JPG, PNG, WEBP, BMP</span>
               </label>
 
               {preview ? <img className="media-preview" src={preview} alt="Selected preview" /> : null}
@@ -353,7 +369,7 @@ export default function App() {
                 disabled={!file || loading}
                 onClick={() => analyzeSelectedFile(file)}
               >
-                {loading ? "Testing..." : "Test File"}
+                {loading ? "Analyzing..." : "Analyze"}
               </button>
             </div>
           ) : (
@@ -365,10 +381,10 @@ export default function App() {
 
               <div className="camera-actions">
                 <button className="primary-button" type="button" onClick={startCamera}>
-                  Open Webcam
+                  Open Camera
                 </button>
                 <button className="secondary-button" type="button" onClick={captureFrame} disabled={!cameraReady || loading}>
-                  {loading ? "Testing..." : "Capture & Test"}
+                  {loading ? "Analyzing..." : "Capture"}
                 </button>
               </div>
             </div>
@@ -382,7 +398,7 @@ export default function App() {
               <div className="panel__header">
                 <div>
                   <h2>Report</h2>
-                  <p className="panel-kicker">Generated from the selected image or webcam frame.</p>
+                  <p className="panel-kicker">Latest result.</p>
                 </div>
             {result ? (
               <span className="status-pill status-pill--live">Ready</span>
@@ -394,22 +410,22 @@ export default function App() {
           {!result ? (
             <div className="empty-state">
               <strong>No report yet</strong>
-              <p>The analyzed image summary will appear here after testing.</p>
+              <p>Results will appear here.</p>
             </div>
           ) : (
             <>
               <div className="report-toolbar">
                 <div className="report-meta-grid">
                   <div className="report-meta">
-                    <span>Report ID</span>
+                    <span>ID</span>
                     <strong>{result.reportId}</strong>
                   </div>
                   <div className="report-meta">
-                    <span>Source File</span>
-                    <strong>{result.fileName}</strong>
+                    <span>File</span>
+                    <strong title={result.fileName}>{shortenFileName(result.fileName, 26)}</strong>
                   </div>
                   <div className="report-meta">
-                    <span>Generated</span>
+                    <span>Time</span>
                     <strong>{formatTimestamp(result.generatedAt)}</strong>
                   </div>
                 </div>
@@ -429,32 +445,32 @@ export default function App() {
               </div>
 
               <div className="insight-banner insight-banner--accent">
-                <span>AI summary</span>
+                <span>Summary</span>
                 <p>{result.summary}</p>
               </div>
 
               <div className="artifacts-grid">
                 <figure className="image-card image-card--hero">
-                  <figcaption>Original Image</figcaption>
+                  <figcaption>Original</figcaption>
                   <img src={result.image} alt="Uploaded original" />
                 </figure>
                 <figure className="image-card image-card--hero">
-                  <figcaption>Annotated Result</figcaption>
+                  <figcaption>Annotated</figcaption>
                   <img src={result.annotatedImage} alt="Annotated analysis" />
                 </figure>
               </div>
 
               {result.summaryChart ? (
                 <figure className="image-card chart-card">
-                  <figcaption>Summary Chart</figcaption>
+                  <figcaption>Chart</figcaption>
                   <img src={result.summaryChart} alt="Summary chart" />
                 </figure>
               ) : null}
 
               <div className="composition-card">
                 <div className="composition-card__header">
-                  <h3>Quality Composition</h3>
-                  <span>{result.tomatoCount} regions detected</span>
+                  <h3>Quality</h3>
+                  <span>{result.tomatoCount} regions</span>
                 </div>
                 {summaryBars.map((item) => (
                   <ProgressRow key={item.label} {...item} />
@@ -463,8 +479,8 @@ export default function App() {
 
               <div className="table-card">
                 <div className="table-card__header">
-                  <h3>Detected Regions</h3>
-                  <span>Defect percent is calculated per region</span>
+                  <h3>Regions</h3>
+                  <span>Per region defect</span>
                 </div>
 
                 <div className="table-wrap">

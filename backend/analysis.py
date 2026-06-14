@@ -21,8 +21,9 @@ CLASS_DEFECTIVE = 0
 CLASS_RIPE = 1
 CLASS_UNRIPE = 2
 
-DEFECT_THRESHOLD_PERCENT = 5.0
-MIN_OVERLAP_PIXELS = 20
+DEFECT_THRESHOLD_PERCENT = 2.5
+MIN_OVERLAP_PIXELS = 5
+MERGE_IOU_THRESHOLD = 0.35
 
 COLORS = {
     "navy": "#152238",
@@ -104,7 +105,63 @@ def split_detections(result) -> tuple[list[Detection], list[Detection], tuple[in
         elif detection.class_id == CLASS_DEFECTIVE:
             defects.append(detection)
 
-    return tomatoes, defects, mask_shape
+    return merge_similar_detections(tomatoes), merge_similar_detections(defects), mask_shape
+
+
+def mask_iou(left: np.ndarray, right: np.ndarray) -> float:
+    intersection = int(np.sum(left & right))
+    if intersection == 0:
+        return 0.0
+    union = int(np.sum(left | right))
+    return intersection / union if union else 0.0
+
+
+def merge_similar_detections(detections: list[Detection]) -> list[Detection]:
+    if len(detections) <= 1:
+        return detections
+
+    clusters: list[list[Detection]] = []
+    for detection in sorted(detections, key=lambda item: item.confidence, reverse=True):
+        matched_cluster: list[Detection] | None = None
+        for cluster in clusters:
+            if cluster[0].class_id != detection.class_id:
+                continue
+            cluster_mask = np.zeros_like(cluster[0].mask, dtype=bool)
+            for member in cluster:
+                cluster_mask |= member.mask
+            if mask_iou(cluster_mask, detection.mask) >= MERGE_IOU_THRESHOLD:
+                matched_cluster = cluster
+                break
+
+        if matched_cluster is None:
+            clusters.append([detection])
+        else:
+            matched_cluster.append(detection)
+
+    merged: list[Detection] = []
+    for cluster in clusters:
+        mask = np.zeros_like(cluster[0].mask, dtype=bool)
+        x1 = y1 = float("inf")
+        x2 = y2 = float("-inf")
+        confidence = 0.0
+        for member in cluster:
+            mask |= member.mask
+            confidence = max(confidence, member.confidence)
+            x1 = min(x1, float(member.box[0]))
+            y1 = min(y1, float(member.box[1]))
+            x2 = max(x2, float(member.box[2]))
+            y2 = max(y2, float(member.box[3]))
+
+        merged.append(
+            Detection(
+                mask=mask,
+                class_id=cluster[0].class_id,
+                confidence=confidence,
+                box=np.array([x1, y1, x2, y2], dtype=float),
+            )
+        )
+
+    return merged
 
 
 def calculate_quality_percentages(
@@ -147,7 +204,10 @@ def assess_tomatoes(tomatoes: list[Detection], defects: list[Detection]) -> list
 
         for defect in defects:
             overlap = tomato.mask & defect.mask
-            if int(np.sum(overlap)) > MIN_OVERLAP_PIXELS:
+            overlap_pixels = int(np.sum(overlap))
+            defect_pixels = int(np.sum(defect.mask))
+            required_overlap = max(MIN_OVERLAP_PIXELS, int(min(tomato_area, defect_pixels) * 0.01))
+            if overlap_pixels >= required_overlap:
                 defect_union |= overlap
 
         defect_area = int(np.sum(defect_union))
