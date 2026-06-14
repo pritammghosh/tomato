@@ -1,34 +1,67 @@
-# Tomato grading app
+# Tomato Grading App
 
-This repo now has two separate parts:
+This project has two parts:
 
-- `backend/` - FastAPI service that runs the YOLO analysis and stores uploaded files and generated report JSON
-- `frontend/` - React + Vite app that lets you upload an image or use the webcam and renders the full report in the browser
+- `backend/` - FastAPI service that runs the YOLO models and saves reports
+- `frontend/` - React + Vite app that uploads images or uses the webcam and shows the report
 
-The backend now uses two models together:
+The app uses two models together:
 
-- `best.pt` - main detector
-- `bestclassifier.pt` - secondary classifier used to refine tomato status
+- `best.pt` - main detection model
+- `bestclassifier.pt` - secondary classification model
 
-## Run the backend
+## What You Need To Install
 
-PowerShell:
+Before running the project, install:
+
+1. Python 3.10 or newer
+2. Node.js 18 or newer
+3. Git
+
+You can get them from:
+
+- https://www.python.org/downloads/
+- https://nodejs.org/
+- https://git-scm.com/downloads
+
+## Download The Project
+
+Clone the repository from GitHub:
 
 ```powershell
-cd backend
-..\.venv\Scripts\python.exe -m pip install -r requirements.txt
-..\.venv\Scripts\python.exe run.py
+git clone <your-github-repo-url>
+cd <repo-folder>
 ```
 
-Git Bash:
+## Project Files You Need
 
-```bash
-cd backend
-../.venv/Scripts/python.exe -m pip install -r requirements.txt
-../.venv/Scripts/python.exe run.py
+Make sure these files are in the repo root:
+
+- `best.pt`
+- `bestclassifier.pt`
+
+The backend loads both automatically from the root folder by default.
+
+## Backend Setup
+
+Open PowerShell in the project root and run:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+.venv\Scripts\python.exe backend\run.py
 ```
 
-## Run the frontend
+If your system uses a different Python command, replace `python` with the correct one.
+
+The backend runs on:
+
+- `http://127.0.0.1:8000`
+
+## Frontend Setup
+
+Open a second PowerShell window in the project root and run:
 
 ```powershell
 cd frontend
@@ -36,13 +69,51 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in the browser.
+The frontend runs on:
 
-If you need to point the React app at another API host, set `VITE_API_BASE_URL` before running `npm run dev` or `npm run build`.
+- `http://localhost:5173`
 
-## Notes
+## How To Use The App
 
-- The backend expects `best.pt` to remain in the repo root.
-- The backend also loads `bestclassifier.pt` from the repo root by default.
-- Uploaded images are saved in `backend/uploads/`.
-- Generated report JSON files are saved in `backend/reports/`.
+1. Start the backend.
+2. Start the frontend.
+3. Open `http://localhost:5173`.
+4. Upload an image or open the webcam.
+5. Run the analysis.
+
+## How To Confirm Both Models Are Working
+
+After analysis, the report should show:
+
+- `Detector + Classifier` in the model status
+- A `Model check` message that names `bestclassifier.pt`
+- A `classifierUsedCount` greater than `0` in the saved report JSON
+
+If the classifier is not loaded, the UI will show `Detector only`.
+
+## Optional Configuration
+
+If you want to use a different classifier file, set:
+
+```powershell
+$env:CLASSIFIER_MODEL_PATH = "C:\path\to\your\classifier.pt"
+```
+
+Then start the backend again.
+
+If the frontend should talk to a different backend host, set:
+
+```powershell
+$env:VITE_API_BASE_URL = "http://127.0.0.1:8000"
+```
+
+## Output Folders
+
+- `backend/uploads/` stores uploaded images
+- `backend/reports/` stores generated report JSON files
+
+## Troubleshooting
+
+- If the backend says the model file is missing, check that `best.pt` and `bestclassifier.pt` are in the repo root.
+- If the webcam does not work, use a browser that supports camera access and allow camera permissions.
+- If the frontend cannot reach the backend, confirm the backend is running on port `8000`.
