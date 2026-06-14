@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import math
 import shutil
@@ -8,6 +9,7 @@ from io import BytesIO
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from functools import lru_cache
 from xml.sax.saxutils import escape as xml_escape
 
 from matplotlib import font_manager as mpl_font_manager
@@ -73,6 +75,16 @@ def shorten_text(value: str | None, max_length: int = 40) -> str:
     head = max(8, math.floor(max_length * 0.6))
     tail = max(6, max_length - head - 1)
     return f"{value[:head]}…{value[-tail:]}"
+
+
+def shorten_text_clean(value: str | None, max_length: int = 40) -> str:
+    if not value:
+        return "Unknown"
+    if len(value) <= max_length:
+        return value
+    head = max(8, math.floor(max_length * 0.6))
+    tail = max(6, max_length - head - 3)
+    return f"{value[:head]}...{value[-tail:]}"
 
 
 def build_report_sections(report: dict) -> list[str]:
@@ -223,7 +235,7 @@ def draw_header(draw: ImageDraw.ImageDraw, report: dict, page_width: int) -> int
     y = PDF_MARGIN
     draw.text((x, y), "Tomato Grading Report", font=title_font, fill=PDF_TEXT)
     y += text_height(draw, "Ag", title_font) + 8
-    draw.text((x, y), shorten_text(report.get("fileName"), 56), font=body_font, fill=PDF_MUTED)
+    draw.text((x, y), shorten_text_clean(report.get("fileName"), 56), font=body_font, fill=PDF_MUTED)
     y += text_height(draw, "Ag", body_font) + 16
     meta = f"Report ID: {report.get('reportId', 'Unknown')}   |   Generated: {format_datetime(report.get('generatedAt'))}"
     draw.text((x, y), meta, font=label_font, fill=PDF_ACCENT)
@@ -354,7 +366,7 @@ def create_assessment_pages(report: dict) -> list[Image.Image]:
             cells = [
                 str(row.get("number", "")),
                 row.get("status", ""),
-                shorten_text(row.get("label"), 26),
+                shorten_text_clean(row.get("label"), 26),
                 f"{float(row.get('confidence', 0)):0.3f}",
                 f"{float(row.get('defectPercent', 0)):0.1f}%",
             ]
@@ -424,71 +436,100 @@ def _docx_paragraph(text: str, *, bold: bool = False, size: int = 22, align: str
 
 
 def build_docx_bytes(report: dict) -> bytes:
-    paragraphs = [
-        _docx_paragraph("Tomato Grading Report", bold=True, size=36, align="center"),
-        _docx_paragraph(f"Report ID: {report.get('reportId', 'Unknown')}", size=22),
-        _docx_paragraph(f"Generated At: {format_datetime(report.get('generatedAt'))}", size=22),
-        _docx_paragraph(f"Source File: {report.get('fileName', 'Unknown')}", size=22),
-        _docx_paragraph("Executive Summary", bold=True, size=28),
-        _docx_paragraph(report.get("summary", ""), size=22),
-        _docx_paragraph("Quality Metrics", bold=True, size=28),
-        _docx_paragraph(f"Regions detected: {report.get('tomatoCount', 0)}", size=22),
-        _docx_paragraph(f"Ripe: {report.get('ripeCount', 0)} ({report.get('ripePct', 0):.1f}%)", size=22),
-        _docx_paragraph(f"Unripe: {report.get('unripeCount', 0)} ({report.get('unripePct', 0):.1f}%)", size=22),
-        _docx_paragraph(f"Defective: {report.get('defectiveCount', 0)} ({report.get('defectPct', 0):.1f}%)", size=22),
-        _docx_paragraph("Detected Regions", bold=True, size=28),
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Inches, Pt
+
+    document = Document()
+    section = document.sections[0]
+    section.top_margin = Inches(0.65)
+    section.bottom_margin = Inches(0.65)
+    section.left_margin = Inches(0.7)
+    section.right_margin = Inches(0.7)
+
+    title = document.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run("Tomato Grading Report")
+    run.bold = True
+    run.font.size = Pt(20)
+
+    meta = document.add_paragraph()
+    meta.add_run(f"Report ID: {report.get('reportId', 'Unknown')}\n").bold = True
+    meta.add_run(f"Generated At: {format_datetime(report.get('generatedAt'))}\n")
+    meta.add_run(f"Source File: {report.get('fileName', 'Unknown')}")
+
+    summary_heading = document.add_paragraph()
+    summary_heading.add_run("Executive Summary").bold = True
+    document.add_paragraph(report.get("summary", "No summary available."))
+
+    metrics_heading = document.add_paragraph()
+    metrics_heading.add_run("Quality Metrics").bold = True
+    metrics = document.add_table(rows=1, cols=2)
+    metrics.style = "Table Grid"
+    metric_header = metrics.rows[0].cells
+    metric_header[0].text = "Metric"
+    metric_header[1].text = "Value"
+    for label, value in (
+        ("Regions detected", report.get("tomatoCount", 0)),
+        ("Ripe", f"{report.get('ripeCount', 0)} ({report.get('ripePct', 0):.1f}%)"),
+        ("Unripe", f"{report.get('unripeCount', 0)} ({report.get('unripePct', 0):.1f}%)"),
+        ("Defective", f"{report.get('defectiveCount', 0)} ({report.get('defectPct', 0):.1f}%)"),
+    ):
+        row = metrics.add_row().cells
+        row[0].text = str(label)
+        row[1].text = str(value)
+
+    image_sections = [
+        ("Original Image", report.get("image")),
+        ("Annotated Image", report.get("annotatedImage")),
+        ("Summary Chart", report.get("summaryChart")),
     ]
 
+    for title_text, image_data in image_sections:
+        img = decode_data_uri(image_data)
+        if img is None:
+            continue
+        document.add_paragraph().add_run(title_text).bold = True
+        buffer = BytesIO()
+        img.save(buffer, format="PNG")
+        buffer.seek(0)
+        document.add_picture(buffer, width=Inches(6.5))
+
+    regions_heading = document.add_paragraph()
+    regions_heading.add_run("Detected Regions").bold = True
     if report.get("assessments"):
+        table = document.add_table(rows=1, cols=4)
+        table.style = "Table Grid"
+        headers = table.rows[0].cells
+        headers[0].text = "#"
+        headers[1].text = "Status"
+        headers[2].text = "Label"
+        headers[3].text = "Confidence / Defect"
         for item in report["assessments"]:
-            paragraphs.append(
-                _docx_paragraph(
-                    (
-                        f"{item.get('number', 0)}. {item.get('label', 'Unknown')} "
-                        f"- Status: {item.get('status', 'Unknown')} "
-                        f"- Confidence: {float(item.get('confidence', 0)):0.3f} "
-                        f"- Defect: {float(item.get('defectPercent', 0)):0.1f}%"
-                    ),
-                    size=22,
-                )
-            )
+            row = table.add_row().cells
+            row[0].text = str(item.get("number", 0))
+            row[1].text = str(item.get("status", "Unknown"))
+            row[2].text = str(item.get("label", "Unknown"))
+            row[3].text = f"{float(item.get('confidence', 0)):0.3f} / {float(item.get('defectPercent', 0)):0.1f}%"
     else:
-        paragraphs.append(_docx_paragraph("No regions were detected for this image.", size=22))
+        document.add_paragraph("No regions were detected for this image.")
 
     if report.get("detailImages"):
-        paragraphs.append(_docx_paragraph("Region Details", bold=True, size=28))
+        details_heading = document.add_paragraph()
+        details_heading.add_run("Region Details").bold = True
         for item in report["detailImages"]:
-            paragraphs.append(_docx_paragraph(f"{item.get('title', 'Detail')}: {item.get('caption', '')}", size=22))
-
-    body_xml = "".join(paragraphs)
-    document_xml = (
-        "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
-        "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
-        f"<w:body>{body_xml}<w:sectPr><w:pgSz w:w='12240' w:h='15840'/><w:pgMar w:top='1440' w:right='1440' w:bottom='1440' w:left='1440' w:header='720' w:footer='720' w:gutter='0'/></w:sectPr></w:body>"
-        "</w:document>"
-    )
-
-    content_types = (
-        "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
-        "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>"
-        "<Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>"
-        "<Default Extension='xml' ContentType='application/xml'/>"
-        "<Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/>"
-        "</Types>"
-    )
-
-    rels = (
-        "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
-        "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>"
-        "<Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='word/document.xml'/>"
-        "</Relationships>"
-    )
+            caption = f"{item.get('title', 'Detail')}: {item.get('caption', '')}"
+            document.add_paragraph(caption)
+            img = decode_data_uri(item.get("image"))
+            if img is None:
+                continue
+            buffer = BytesIO()
+            img.save(buffer, format="PNG")
+            buffer.seek(0)
+            document.add_picture(buffer, width=Inches(6.5))
 
     buffer = BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("[Content_Types].xml", content_types)
-        archive.writestr("_rels/.rels", rels)
-        archive.writestr("word/document.xml", document_xml)
+    document.save(buffer)
     return buffer.getvalue()
 
 

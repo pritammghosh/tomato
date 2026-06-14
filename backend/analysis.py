@@ -116,6 +116,46 @@ def mask_iou(left: np.ndarray, right: np.ndarray) -> float:
     return intersection / union if union else 0.0
 
 
+def box_iou(left: np.ndarray, right: np.ndarray) -> float:
+    left_x1, left_y1, left_x2, left_y2 = [float(value) for value in left]
+    right_x1, right_y1, right_x2, right_y2 = [float(value) for value in right]
+
+    inter_x1 = max(left_x1, right_x1)
+    inter_y1 = max(left_y1, right_y1)
+    inter_x2 = min(left_x2, right_x2)
+    inter_y2 = min(left_y2, right_y2)
+
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    intersection = inter_w * inter_h
+    if intersection == 0:
+        return 0.0
+
+    left_area = max(0.0, (left_x2 - left_x1) * (left_y2 - left_y1))
+    right_area = max(0.0, (right_x2 - right_x1) * (right_y2 - right_y1))
+    union = left_area + right_area - intersection
+    return intersection / union if union else 0.0
+
+
+def mask_overlap_pixels(left: np.ndarray, right: np.ndarray) -> int:
+    return int(np.sum(left & right))
+
+
+def should_merge_same_class(left: Detection, right: Detection) -> bool:
+    overlap_pixels = mask_overlap_pixels(left.mask, right.mask)
+    if overlap_pixels < MIN_OVERLAP_PIXELS:
+        return False
+
+    left_area = int(np.sum(left.mask))
+    right_area = int(np.sum(right.mask))
+    if left_area == 0 or right_area == 0:
+        return False
+
+    smaller_area = min(left_area, right_area)
+    coverage = overlap_pixels / smaller_area
+    return coverage >= 0.25 or box_iou(left.box, right.box) >= 0.2
+
+
 def merge_similar_detections(detections: list[Detection]) -> list[Detection]:
     if len(detections) <= 1:
         return detections
@@ -127,9 +167,20 @@ def merge_similar_detections(detections: list[Detection]) -> list[Detection]:
             if cluster[0].class_id != detection.class_id:
                 continue
             cluster_mask = np.zeros_like(cluster[0].mask, dtype=bool)
+            cluster_box = np.array([np.inf, np.inf, -np.inf, -np.inf], dtype=float)
             for member in cluster:
                 cluster_mask |= member.mask
-            if mask_iou(cluster_mask, detection.mask) >= MERGE_IOU_THRESHOLD:
+                cluster_box[0] = min(cluster_box[0], float(member.box[0]))
+                cluster_box[1] = min(cluster_box[1], float(member.box[1]))
+                cluster_box[2] = max(cluster_box[2], float(member.box[2]))
+                cluster_box[3] = max(cluster_box[3], float(member.box[3]))
+            cluster_detection = Detection(
+                mask=cluster_mask,
+                class_id=cluster[0].class_id,
+                confidence=max(member.confidence for member in cluster),
+                box=cluster_box,
+            )
+            if should_merge_same_class(cluster_detection, detection):
                 matched_cluster = cluster
                 break
 
@@ -164,6 +215,76 @@ def merge_similar_detections(detections: list[Detection]) -> list[Detection]:
     return merged
 
 
+def should_attach_defect_to_tomato(tomato: Detection, defect: Detection) -> bool:
+    overlap_pixels = mask_overlap_pixels(tomato.mask, defect.mask)
+    if overlap_pixels < MIN_OVERLAP_PIXELS:
+        return False
+
+    tomato_area = int(np.sum(tomato.mask))
+    defect_area = int(np.sum(defect.mask))
+    if tomato_area == 0 or defect_area == 0:
+        return False
+
+    defect_coverage = overlap_pixels / defect_area
+    tomato_coverage = overlap_pixels / tomato_area
+    return defect_coverage >= 0.45 or tomato_coverage >= 0.02 or box_iou(tomato.box, defect.box) >= 0.12
+
+
+def dilate_mask(mask: np.ndarray, iterations: int = 1) -> np.ndarray:
+    if iterations <= 0:
+        return mask
+
+    result = mask.copy()
+    for _ in range(iterations):
+        padded = np.pad(result, 1, mode="constant", constant_values=False)
+        grown = np.zeros_like(result, dtype=bool)
+        height, width = result.shape
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                grown |= padded[1 + dy : 1 + dy + height, 1 + dx : 1 + dx + width]
+        result = grown
+    return result
+
+
+def expand_defect_mask(tomato: Detection, defect_union: np.ndarray, image_array: np.ndarray) -> np.ndarray:
+    if not np.any(defect_union):
+        return defect_union
+
+    y_indices, x_indices = np.where(tomato.mask)
+    if len(x_indices) == 0:
+        return defect_union
+
+    x1 = max(0, int(x_indices.min()) - 6)
+    y1 = max(0, int(y_indices.min()) - 6)
+    x2 = min(image_array.shape[1], int(x_indices.max()) + 7)
+    y2 = min(image_array.shape[0], int(y_indices.max()) + 7)
+
+    crop = image_array[y1:y2, x1:x2].astype(np.float32) / 255.0
+    crop_mask = tomato.mask[y1:y2, x1:x2]
+    if crop.size == 0 or not np.any(crop_mask):
+        return defect_union
+
+    max_channel = crop.max(axis=2)
+    min_channel = crop.min(axis=2)
+    saturation = np.where(max_channel == 0, 0.0, (max_channel - min_channel) / np.maximum(max_channel, 1e-6))
+    brightness = max_channel
+
+    tomato_pixels = brightness[crop_mask]
+    if tomato_pixels.size == 0:
+        return defect_union
+
+    dark_threshold = min(0.88, float(np.percentile(tomato_pixels, 65)))
+    dark_candidates = crop_mask & (brightness <= dark_threshold) & (saturation <= 0.9)
+
+    local_defect = defect_union[y1:y2, x1:x2]
+    expanded_seed = dilate_mask(local_defect, iterations=12)
+    refined_local = local_defect | (expanded_seed & dark_candidates)
+
+    refined = defect_union.copy()
+    refined[y1:y2, x1:x2] |= refined_local
+    return refined
+
+
 def calculate_quality_percentages(
     tomatoes: list[Detection], defects: list[Detection], mask_shape: tuple[int, int]
 ) -> tuple[float, float, float]:
@@ -195,7 +316,9 @@ def calculate_quality_percentages(
     )
 
 
-def assess_tomatoes(tomatoes: list[Detection], defects: list[Detection]) -> list[TomatoAssessment]:
+def assess_tomatoes(
+    tomatoes: list[Detection], defects: list[Detection], image_array: np.ndarray
+) -> list[TomatoAssessment]:
     assessments: list[TomatoAssessment] = []
 
     for index, tomato in enumerate(tomatoes, start=1):
@@ -203,15 +326,13 @@ def assess_tomatoes(tomatoes: list[Detection], defects: list[Detection]) -> list
         defect_union = np.zeros_like(tomato.mask, dtype=bool)
 
         for defect in defects:
-            overlap = tomato.mask & defect.mask
-            overlap_pixels = int(np.sum(overlap))
-            defect_pixels = int(np.sum(defect.mask))
-            required_overlap = max(MIN_OVERLAP_PIXELS, int(min(tomato_area, defect_pixels) * 0.01))
-            if overlap_pixels >= required_overlap:
-                defect_union |= overlap
+            if should_attach_defect_to_tomato(tomato, defect):
+                defect_union |= defect.mask
 
         defect_area = int(np.sum(defect_union))
-        defect_percent = (defect_area / tomato_area * 100) if tomato_area else 0.0
+        effective_mask = tomato.mask | defect_union
+        effective_area = int(np.sum(effective_mask))
+        defect_percent = (defect_area / effective_area * 100) if effective_area else 0.0
 
         if defect_percent > DEFECT_THRESHOLD_PERCENT:
             status = "Defective"
@@ -256,7 +377,7 @@ def assess_standalone_defects(
     number = start_number
 
     for defect in defects:
-        has_parent_tomato = any(int(np.sum(tomato.mask & defect.mask)) > MIN_OVERLAP_PIXELS for tomato in tomatoes)
+        has_parent_tomato = any(should_attach_defect_to_tomato(tomato, defect) for tomato in tomatoes)
         if has_parent_tomato:
             continue
 
@@ -441,7 +562,7 @@ def analyze_image(model: YOLO, image_path: Path, confidence: float) -> dict[str,
     original_image = Image.open(image_path).convert("RGB")
     image_array = np.array(original_image)
 
-    assessments = assess_tomatoes(tomatoes, defects)
+    assessments = assess_tomatoes(tomatoes, defects, image_array)
     assessments.extend(assess_standalone_defects(defects, tomatoes, len(assessments)))
 
     ripe_count = sum(1 for item in assessments if item.status == "Ripe")

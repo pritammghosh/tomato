@@ -54,6 +54,25 @@ function shortenFileName(name, maxLength = 24) {
   return `${stem.slice(0, left)}…${stem.slice(-right)}${extension}`;
 }
 
+function shortenFileNameClean(name, maxLength = 24) {
+  if (!name || name.length <= maxLength) {
+    return name || "N/A";
+  }
+
+  const dotIndex = name.lastIndexOf(".");
+  const extension = dotIndex > -1 ? name.slice(dotIndex) : "";
+  const stem = dotIndex > -1 ? name.slice(0, dotIndex) : name;
+  const room = maxLength - extension.length - 3;
+
+  if (room <= 4) {
+    return `${stem.slice(0, Math.max(1, maxLength - 3))}...`;
+  }
+
+  const left = Math.ceil(room * 0.55);
+  const right = Math.max(1, room - left);
+  return `${stem.slice(0, left)}...${stem.slice(-right)}${extension}`;
+}
+
 function StatCard({ label, value, tone }) {
   return (
     <div className={`stat-card stat-${tone}`}>
@@ -422,7 +441,7 @@ export default function App() {
                   </div>
                   <div className="report-meta">
                     <span>File</span>
-                    <strong title={result.fileName}>{shortenFileName(result.fileName, 26)}</strong>
+                    <strong title={result.fileName}>{shortenFileNameClean(result.fileName, 26)}</strong>
                   </div>
                   <div className="report-meta">
                     <span>Time</span>
